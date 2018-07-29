@@ -35,7 +35,7 @@ namespace BtClassicScanner.ViewModels
             LazyCommand(ref _findDevicesCommand, DoFindDevices, () => !IsFindingDevices)
                 .ObservesProperty(() => IsFindingDevices);
 
-        public void DoFindDevices()
+        public async void DoFindDevices()
         {
             if (IsFindingDevices) { return;}
 
@@ -49,7 +49,7 @@ namespace BtClassicScanner.ViewModels
                     IsFindingDevices = false;
                 });
             _discoveryObserver.GetSubscription(_bluetoothService.GetDiscoveryObservable());
-            _bluetoothService.StartDeviceDiscovery(20);
+            await _bluetoothService.StartDeviceDiscovery(30);
         }
 
         #endregion
