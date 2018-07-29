@@ -1,6 +1,9 @@
 ﻿using Android.App;
 using Android.Content.PM;
 using Android.OS;
+using BtClassicScanner.Droid.Services;
+using BtClassicScanner.Services;
+using CodeBrix.Prism.Ioc;
 using Prism;
 using Prism.Ioc;
 
@@ -34,6 +37,7 @@ namespace BtClassicScanner.Droid
             CodeBrix.Prism.Platform.RegisterTypes(container);
 
             // Register any platform specific services
+            container.RegisterDisposable<IBluetoothService, AndroidBluetoothService>();
         }
     }
 }
