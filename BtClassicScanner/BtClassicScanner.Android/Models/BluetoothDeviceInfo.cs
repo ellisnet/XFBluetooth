@@ -8,8 +8,19 @@ namespace BtClassicScanner.Models
         private BluetoothDevice _device;
 
         public bool IsPaired { get; set; }
+
+        private bool _isConnected;
+        public bool IsConnected
+        {
+            get => _isConnected && ConnectedSocket != null;
+            set => _isConnected = value;
+        }
+
+        public BluetoothSocket ConnectedSocket { get; set; }
         public string DeviceName => _device.Name;
         public string HardwareAddress => _device.Address;
+
+        public BluetoothDevice NativeDevice => _device;
 
         public BluetoothDeviceInfo(BluetoothDevice device)
         {

@@ -15,6 +15,8 @@ namespace BtClassicScanner.ViewModels
 {
     public class MainPageViewModel : ViewModelBase
     {
+        private static readonly string DeviceToLookFor = "SL_";
+
         private IBluetoothService _bluetoothService;
         private SimpleObserver<IBluetoothDevice> _discoveryObserver;
         private IPermissions _permissions = CrossPermissions.Current;
@@ -95,10 +97,18 @@ namespace BtClassicScanner.ViewModels
 
         #endregion
 
-        public void DeviceDiscovered(IBluetoothDevice device)
+        public async void DeviceDiscovered(IBluetoothDevice device)
         {
-            Debug.WriteLine($"Device found -\nName: {device.DeviceName}\nAddress: {device.HardwareAddress}");
-            DialogService.Toast($"Device found - Name: {device.DeviceName} - Address: {device.HardwareAddress}");
+            if (device != null)
+            {
+                Debug.WriteLine($"Device detected -\nName: {device.DeviceName}\nAddress: {device.HardwareAddress}");
+                if (!String.IsNullOrWhiteSpace(device.DeviceName) && device.DeviceName.Contains(DeviceToLookFor))
+                {
+                    DialogService.Toast($"Scanner found! Name: {device.DeviceName} - Address: {device.HardwareAddress}");
+                    await _bluetoothService.StopDeviceDiscovery();
+                    bool isPaired = await _bluetoothService.PairWithDevice(device);
+                }
+            }
         }
 
         public MainPageViewModel(

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using BtClassicScanner.Models;
 
@@ -10,5 +11,7 @@ namespace BtClassicScanner.Services
         IObservable<IBluetoothDevice> GetDiscoveryObservable();
         Task<bool> StartDeviceDiscovery(int? timeoutSeconds = null);
         Task<bool> StopDeviceDiscovery();
+        Task<bool> PairWithDevice(IBluetoothDevice device);
+        Task<IList<IBluetoothDevice>> GetPairedDevices();
     }
 }
