@@ -10,6 +10,8 @@ using BtClassicScanner.Models;
 using BtClassicScanner.Services;
 using CodeBrix.Prism.Android.Services;
 using CodeBrix.Prism.Helpers;
+using Plugin.Permissions;
+using Plugin.Permissions.Abstractions;
 using Debug = System.Diagnostics.Debug;
 
 //Created based on documentation available here:
@@ -81,6 +83,12 @@ namespace BtClassicScanner.Droid.Services
 
             if (startDiscovery)
             {
+                PermissionStatus locationPermission = await CrossPermissions.Current.CheckPermissionStatusAsync(Permission.Location);
+                if (locationPermission != PermissionStatus.Granted)
+                {
+                    throw new InvalidOperationException("Cannot scan for devices without the necessary permissions.");
+                }
+
                 _adapter = _adapter ?? BluetoothAdapter.DefaultAdapter;
 
                 if (_adapter == null)

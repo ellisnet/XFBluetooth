@@ -147,6 +147,9 @@
     <Reference Include="Xamarin.iOS" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Plugin.Permissions">
+      <Version>3.0.0.12</Version>
+    </PackageReference>
     <PackageReference Include="Prism.DryIoc.Forms">
       <Version>7.0.0.396</Version>
     </PackageReference>

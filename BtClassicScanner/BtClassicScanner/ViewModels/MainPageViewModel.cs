@@ -1,10 +1,13 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using Acr.UserDialogs;
 using BtClassicScanner.Models;
 using BtClassicScanner.Services;
 using CodeBrix.Prism.Helpers;
 using CodeBrix.Prism.ViewModels;
+using Plugin.Permissions;
+using Plugin.Permissions.Abstractions;
 using Prism.Commands;
 using Prism.Navigation;
 
@@ -14,6 +17,7 @@ namespace BtClassicScanner.ViewModels
     {
         private IBluetoothService _bluetoothService;
         private SimpleObserver<IBluetoothDevice> _discoveryObserver;
+        private IPermissions _permissions = CrossPermissions.Current;
 
         #region Bindable properties
 
@@ -41,15 +45,50 @@ namespace BtClassicScanner.ViewModels
 
             IsFindingDevices = true;
 
-            _discoveryObserver = new SimpleObserver<IBluetoothDevice>(DeviceDiscovered, 
-                () => IsFindingDevices = false, 
-                async (exception) =>
+            try
+            {
+                _discoveryObserver = new SimpleObserver<IBluetoothDevice>(DeviceDiscovered,
+                    () => IsFindingDevices = false,
+                    async (exception) =>
+                    {
+                        await ShowErrorAsync(exception);
+                        IsFindingDevices = false;
+                    });
+                _discoveryObserver.GetSubscription(_bluetoothService.GetDiscoveryObservable());
+
+                //Check for permission on location service - needed for Bluetooth device discovery
+                PermissionStatus status = await _permissions.CheckPermissionStatusAsync(Permission.Location);
+                if (status != PermissionStatus.Granted)
                 {
-                    await ShowErrorAsync(exception);
-                    IsFindingDevices = false;
-                });
-            _discoveryObserver.GetSubscription(_bluetoothService.GetDiscoveryObservable());
-            await _bluetoothService.StartDeviceDiscovery(30);
+                    //Show the message whether rationale is needed or not.
+                    //if (await _permissions.ShouldShowRequestPermissionRationaleAsync(Permission.Location))
+                    //{
+                        await ShowInfoAsync(
+                            "The app needs access to the Location service to scan for Bluetooth devices.",
+                            "Location permission needed");
+                    //}
+
+                    Dictionary<Permission, PermissionStatus> permissionResult = await _permissions.RequestPermissionsAsync(Permission.Location);
+                    if (permissionResult.ContainsKey(Permission.Location))
+                    {
+                        status = permissionResult[Permission.Location];
+                    }
+                }
+
+                if (status == PermissionStatus.Granted)
+                {
+                    await _bluetoothService.StartDeviceDiscovery(30);
+                }
+                else if (status != PermissionStatus.Unknown)
+                {
+                    await ShowErrorAsync("Unable to scan for Bluetooth devices without the required permissions.");
+                }
+            }
+            catch (Exception e)
+            {
+                await ShowErrorAsync(e);
+                IsFindingDevices = false;
+            }            
         }
 
         #endregion
