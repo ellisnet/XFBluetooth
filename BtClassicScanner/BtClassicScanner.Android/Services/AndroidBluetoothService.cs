@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Android.Bluetooth;
 using Android.Content;
+using Android.OS;
 using BtClassicScanner.Models;
 using BtClassicScanner.Services;
 using CodeBrix.Prism.Android.Services;
@@ -19,6 +20,8 @@ using Timer = System.Timers.Timer;
 //Created based on documentation available here:
 // https://developer.android.com/guide/topics/connectivity/bluetooth.html
 // https://developer.xamarin.com/api/member/Android.Bluetooth.BluetoothAdapter.StartDiscovery/
+// https://developer.android.com/reference/android/bluetooth/BluetoothDevice#createRfcommSocketToServiceRecord%28java.util.UUID%29
+// https://acaliaro.wordpress.com/2017/02/07/connect-a-barcode-reader-to-a-xamarin-forms-app-via-bluetooth/
 
 namespace BtClassicScanner.Droid.Services
 {
@@ -32,7 +35,8 @@ namespace BtClassicScanner.Droid.Services
         private static bool _isDiscoveryCanceling;
         private static readonly object _discoveryLocker = new object();
         private static readonly object _deviceDiscoveredLocker = new object();
-        private static readonly UUID _serviceUuid = UUID.RandomUUID();
+        //private static readonly UUID _serviceUuid = UUID.RandomUUID();
+        private static readonly UUID _scannerUuid = UUID.FromString("00001101-0000-1000-8000-00805f9b34fb"); //TODO: Got this from one of the links shown above, but need to the correct one from Teemi, I think.
         private static string _serviceName => _context.PackageName;
 
         private readonly object _discoverySubscriberLocker = new object();
@@ -73,10 +77,10 @@ namespace BtClassicScanner.Droid.Services
         }
 
         //TODO: Do I need the server socket at all?
-        private async Task<bool> ConnectDeviceToSocket(BluetoothDeviceInfo deviceInfo, BluetoothSocket serverSocket)
+        private async Task<bool> ConnectDeviceToSocket(BluetoothDeviceInfo deviceInfo) //, BluetoothSocket serverSocket)
         {
             if (deviceInfo == null) { throw new ArgumentNullException(nameof(deviceInfo)); }
-            if (serverSocket == null) { throw new ArgumentNullException(nameof(serverSocket)); }
+            //if (serverSocket == null) { throw new ArgumentNullException(nameof(serverSocket)); }
             bool result = false;
 
             BluetoothSocket deviceSocket;
@@ -88,7 +92,7 @@ namespace BtClassicScanner.Droid.Services
             {
                 try
                 {
-                    tcs.SetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_serviceUuid));
+                    tcs.SetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_scannerUuid));
                 }
                 catch (Exception e)
                 {
@@ -105,35 +109,70 @@ namespace BtClassicScanner.Droid.Services
                 //Cancel discovery on adapter - just in case
                 _adapter.CancelDiscovery();
 
-                var connectTcs = new TaskCompletionSource<bool>();
+                //var connectTcs = new TaskCompletionSource<bool>();
 
-                await Task.Run(() =>
+                try
                 {
-                    try
+                    var test = deviceInfo.NativeDevice.FetchUuidsWithSdp();  //This might work to get the UUIDS/service id.  Need to figure out how to receive the inbound intent - BroadcastReceiver?
+                    var uuids = deviceInfo.NativeDevice.GetUuids(); //Not working, and probably won't work
+
+                    await deviceSocket.ConnectAsync();  //Currently failing - wrong service id?
+                    if (deviceSocket.IsConnected)
                     {
-                        deviceSocket.Connect();
                         deviceInfo.IsConnected = true;
                         deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
                         deviceInfo.ConnectedSocket = deviceSocket;
-                        connectTcs.SetResult(true);
+                        result = true;
                     }
-                    catch (Exception e)
+                }
+                catch (Exception e)
+                {
+                    Debug.WriteLine(e.ToString());
+                    Debugger.Break();
+
+                    try
                     {
-                        try
-                        {
-                            deviceSocket.Close();
-                        }
-                        catch (Exception)
-                        {
-                            //Nothing to do here - couldn't close the socket
-                        }
-                        Debug.WriteLine(e.ToString());
-                        Debugger.Break();
-                        connectTcs.SetResult(false);
+                        deviceSocket.Close();
                     }
-                });
-                result = await connectTcs.Task;
+                    catch (Exception)
+                    {
+                        //Nothing to do here - couldn't close the socket
+                    }
+
+                    result = false;
+                }
             }
+
+
+
+
+            //    await Task.Run(() =>
+            //    {
+            //        try
+            //        {
+            //            deviceSocket.Connect();
+            //            deviceInfo.IsConnected = true;
+            //            deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
+            //            deviceInfo.ConnectedSocket = deviceSocket;
+            //            connectTcs.SetResult(true);
+            //        }
+            //        catch (Exception e)
+            //        {
+            //            try
+            //            {
+            //                deviceSocket.Close();
+            //            }
+            //            catch (Exception)
+            //            {
+            //                //Nothing to do here - couldn't close the socket
+            //            }
+            //            Debug.WriteLine(e.ToString());
+            //            Debugger.Break();
+            //            connectTcs.SetResult(false);
+            //        }
+            //    });
+            //    result = await connectTcs.Task;
+            //}
             
             return result;
         }
@@ -345,40 +384,43 @@ namespace BtClassicScanner.Droid.Services
                 try
                 {
                     CheckAdapter();
-                    BluetoothServerSocket tempSocket;
-                    BluetoothSocket socket;
-                    var tcs = new TaskCompletionSource<BluetoothServerSocket>();
 
-                    //TODO: Need to kick off a timer to time out the task
+                    result = await ConnectDeviceToSocket(deviceInfo);
 
-                    await Task.Run(() =>
-                    {
-                        try
-                        {
-                            tcs.SetResult(_adapter.ListenUsingRfcommWithServiceRecord(_serviceName, _serviceUuid));
-                        }
-                        catch (Exception e)
-                        {
-                            Debug.WriteLine(e.ToString());
-                            Debugger.Break();
-                            throw;
-                        }
-                    });
+                    //BluetoothServerSocket tempSocket;
+                    //BluetoothSocket socket;
+                    //var tcs = new TaskCompletionSource<BluetoothServerSocket>();
 
-                    tempSocket = await tcs.Task;
+                    ////TODO: Need to kick off a timer to time out the task
 
-                    try
-                    {
-                        socket = await tempSocket.AcceptAsync(2000); //Can't find documentation about what the timeout is - assuming milliseconds?
-                        result = await ConnectDeviceToSocket(deviceInfo, socket);
-                        tempSocket.Close();
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.WriteLine(e.ToString());
-                        Debugger.Break();
-                        throw;
-                    }                    
+                    //await Task.Run(() =>
+                    //{
+                    //    try
+                    //    {
+                    //        tcs.SetResult(_adapter.ListenUsingRfcommWithServiceRecord(_serviceName, _serviceUuid));
+                    //    }
+                    //    catch (Exception e)
+                    //    {
+                    //        Debug.WriteLine(e.ToString());
+                    //        Debugger.Break();
+                    //        throw;
+                    //    }
+                    //});
+
+                    //tempSocket = await tcs.Task;
+
+                    //try
+                    //{
+                    //    socket = await tempSocket.AcceptAsync(2000); //Can't find documentation about what the timeout is - assuming milliseconds?
+                    //    result = await ConnectDeviceToSocket(deviceInfo, socket);
+                    //    tempSocket.Close();
+                    //}
+                    //catch (Exception e)
+                    //{
+                    //    Debug.WriteLine(e.ToString());
+                    //    Debugger.Break();
+                    //    throw;
+                    //}                    
                 }
                 catch (Exception e)
                 {
