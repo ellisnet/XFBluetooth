@@ -2,7 +2,10 @@
 <ContentPage xmlns="http://xamarin.com/schemas/2014/forms"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:local="clr-namespace:BtClassicScanner.Views"
-             x:Class="BtClassicScanner.Views.MainPage">
+             xmlns:vm="clr-namespace:BtClassicScanner.ViewModels"
+             x:Class="BtClassicScanner.Views.MainPage"
+             BindingContext="{Binding Source={x:Static vm:DesignTimeViewModelLocator.MainPage}}"
+             Title="{Binding Title}">
 
     <StackLayout>
         <!-- Place new controls here -->

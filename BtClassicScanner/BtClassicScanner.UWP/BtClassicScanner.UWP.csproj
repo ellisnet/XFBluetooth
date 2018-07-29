@@ -150,6 +150,14 @@
     <PackageReference Include="Microsoft.NETCore.UniversalWindowsPlatform" Version="6.1.5" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\..\CodeBrix_private\Source\Prism\CodeBrix.Prism.UWP\CodeBrix.Prism.UWP.csproj">
+      <Project>{40ee47cf-24fc-4f1a-a2c9-147e4d74be58}</Project>
+      <Name>CodeBrix.Prism.UWP</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\..\..\CodeBrix_private\Source\Prism\CodeBrix.Prism\CodeBrix.Prism.csproj">
+      <Project>{3f6f4a33-05a5-4ead-8b0c-3717d0c643cf}</Project>
+      <Name>CodeBrix.Prism</Name>
+    </ProjectReference>
     <ProjectReference Include="..\BtClassicScanner\BtClassicScanner.csproj">
       <Project>{A2D48A80-DF9E-4602-84F2-E75619C30E0D}</Project>
       <Name>BtClassicScanner</Name>
