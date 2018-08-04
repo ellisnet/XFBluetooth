@@ -35,8 +35,7 @@ namespace BtClassicScanner.Droid.Services
         private static bool _isDiscoveryCanceling;
         private static readonly object _discoveryLocker = new object();
         private static readonly object _deviceDiscoveredLocker = new object();
-        //private static readonly UUID _serviceUuid = UUID.RandomUUID();
-        private static readonly UUID _scannerUuid = UUID.FromString("00001101-0000-1000-8000-00805f9b34fb"); //TODO: Got this from one of the links shown above, but need to the correct one from Teemi, I think.
+        private static readonly UUID _scannerUuid = UUID.FromString("00001812-0000-1000-8000-00805f9b34fb");  //Read this UUID from the Teemi TMSL-55 2D barcode scanner
         private static string _serviceName => _context.PackageName;
 
         private readonly object _discoverySubscriberLocker = new object();
@@ -46,10 +45,15 @@ namespace BtClassicScanner.Droid.Services
         private SimpleBroadcastReceiver _discoveryReceiver;
         private SimpleBroadcastReceiver _discoveryStartedReceiver;
         private SimpleBroadcastReceiver _discoveryFinishedReceiver;
+        private SimpleBroadcastReceiver _uuidReceiver;
         private bool _isDiscoveryReceiverRegistered;
         private Timer _discoveryTimeoutTimer;
         private TaskCompletionSource<bool> _pairedDeviceTcs;
         private readonly SemaphoreSlim _pairedDeviceLocker = new SemaphoreSlim(1, 1);
+        private readonly List<UUID> _serviceUuids = new List<UUID>();
+        private readonly object _serviceUuidLocker = new object();
+        private Timer _uuidSearchTimer;
+        private Timer _uuidSearchTimeoutTimer;
 
         #region Private methods
 
@@ -76,6 +80,55 @@ namespace BtClassicScanner.Droid.Services
             }
         }
 
+        private async Task<IList<UUID>> GetDeviceServiceUuids(BluetoothDeviceInfo deviceInfo)
+        {
+            if (deviceInfo == null) { throw new ArgumentNullException(nameof(deviceInfo)); }
+            var searchTcs = new TaskCompletionSource<bool>();
+            _serviceUuids.Clear();
+
+            _uuidSearchTimer = new Timer(2000) {AutoReset = false};
+            _uuidSearchTimer.Elapsed += (sender, args) => { searchTcs?.TrySetResult(true); };
+
+            _uuidSearchTimeoutTimer = new Timer(10000) { AutoReset = false }; //Timeout after 10 seconds
+            _uuidSearchTimeoutTimer.Elapsed += (sender, args) => { searchTcs?.TrySetResult(false); };
+
+            _uuidReceiver = new SimpleBroadcastReceiver((context, intent) =>
+            {
+                lock (_serviceUuidLocker)
+                {
+                    IParcelable[] parcelUuids = intent.GetParcelableArrayExtra(BluetoothDevice.ExtraUuid);
+                    if (parcelUuids != null)
+                    {
+                        foreach (IParcelable parcelUuid in parcelUuids)
+                        {
+                            var uuid = UUID.FromString(parcelUuid.ToString());
+                            if (!_serviceUuids.Any(a => a.Equals(uuid)))
+                            {
+                                _serviceUuids.Add(uuid);
+                            }
+                        }
+                    }
+
+                    _uuidSearchTimer.Stop(); //does nothing if the timer is not already started
+                    _uuidSearchTimer.Start(); //Start the timer to stop searching, if another UUID isn't found first
+                }
+            });
+
+            _context.RegisterReceiver(_uuidReceiver, new IntentFilter(BluetoothDevice.ActionUuid));
+            _adapter.CancelDiscovery();
+
+            deviceInfo.NativeDevice.FetchUuidsWithSdp();
+            _uuidSearchTimeoutTimer.Start();
+
+            await searchTcs.Task;
+
+            _uuidSearchTimer.Stop();
+            _uuidSearchTimeoutTimer.Stop();
+            _context.UnregisterReceiver(_uuidReceiver);
+
+            return _serviceUuids.ToArray();
+        }
+
         //TODO: Do I need the server socket at all?
         private async Task<bool> ConnectDeviceToSocket(BluetoothDeviceInfo deviceInfo) //, BluetoothSocket serverSocket)
         {
@@ -86,12 +139,18 @@ namespace BtClassicScanner.Droid.Services
             BluetoothSocket deviceSocket;
             var tcs = new TaskCompletionSource<BluetoothSocket>();
 
-            //TODO: Need to kick off a timer to time out the task
+            var socketTimeout = new Timer(10000) {AutoReset = false};
+            socketTimeout.Elapsed += (sender, args) => { tcs?.TrySetResult(null);};
 
-            await Task.Run(() =>
+            new Task(async () =>
             {
                 try
                 {
+                    IList<UUID> uuids = await GetDeviceServiceUuids(deviceInfo);
+                    if (!uuids.Contains(_scannerUuid))
+                    {
+                        throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_scannerUuid}");
+                    }
                     tcs.SetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_scannerUuid));
                 }
                 catch (Exception e)
@@ -100,9 +159,13 @@ namespace BtClassicScanner.Droid.Services
                     Debugger.Break();
                     throw;
                 }
-            });
+            }).Start();
+
+            socketTimeout.Start();
 
             deviceSocket = await tcs.Task;
+
+            socketTimeout.Stop();
 
             if (deviceSocket != null)
             {
@@ -113,8 +176,11 @@ namespace BtClassicScanner.Droid.Services
 
                 try
                 {
-                    var test = deviceInfo.NativeDevice.FetchUuidsWithSdp();  //This might work to get the UUIDS/service id.  Need to figure out how to receive the inbound intent - BroadcastReceiver?
-                    var uuids = deviceInfo.NativeDevice.GetUuids(); //Not working, and probably won't work
+
+                        //var test = deviceInfo.NativeDevice.FetchUuidsWithSdp();  //This might work to get the UUIDS/service id.  Need to figure out how to receive the inbound intent - BroadcastReceiver?
+                    ////var uuids = deviceInfo.NativeDevice.GetUuids(); //Not working, and probably won't work
+
+                    //await connectTcs.Task;
 
                     await deviceSocket.ConnectAsync();  //Currently failing - wrong service id?
                     if (deviceSocket.IsConnected)
