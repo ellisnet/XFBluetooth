@@ -35,7 +35,8 @@ namespace BtClassicScanner.Droid.Services
         private static bool _isDiscoveryCanceling;
         private static readonly object _discoveryLocker = new object();
         private static readonly object _deviceDiscoveredLocker = new object();
-        private static readonly UUID _scannerUuid = UUID.FromString("00001812-0000-1000-8000-00805f9b34fb");  //Read this UUID from the Teemi TMSL-55 2D barcode scanner
+        private static readonly UUID _expectedUuid = UUID.FromString("00001812-0000-1000-8000-00805f9b34fb");  //Read this UUID from the Teemi TMSL-55 2D barcode scanner
+        private static readonly UUID _serialPortUuid = UUID.FromString("00001101-0000-1000-8000-00805f9b34fb"); //Standard serial port uuid
         private static string _serviceName => _context.PackageName;
 
         private readonly object _discoverySubscriberLocker = new object();
@@ -46,14 +47,17 @@ namespace BtClassicScanner.Droid.Services
         private SimpleBroadcastReceiver _discoveryStartedReceiver;
         private SimpleBroadcastReceiver _discoveryFinishedReceiver;
         private SimpleBroadcastReceiver _uuidReceiver;
+        private SimpleBroadcastReceiver _deviceConnectedReceiver;
         private bool _isDiscoveryReceiverRegistered;
+        private bool _deviceConnectBroadcastReceived;
         private Timer _discoveryTimeoutTimer;
-        private TaskCompletionSource<bool> _pairedDeviceTcs;
+        private TaskCompletionSource<bool> _connectDeviceTcs;
         private readonly SemaphoreSlim _pairedDeviceLocker = new SemaphoreSlim(1, 1);
         private readonly List<UUID> _serviceUuids = new List<UUID>();
         private readonly object _serviceUuidLocker = new object();
         private Timer _uuidSearchTimer;
         private Timer _uuidSearchTimeoutTimer;
+        private UUID _foundUuid;
 
         #region Private methods
 
@@ -86,21 +90,23 @@ namespace BtClassicScanner.Droid.Services
             var searchTcs = new TaskCompletionSource<bool>();
             _serviceUuids.Clear();
 
-            _uuidSearchTimer = new Timer(2000) {AutoReset = false};
+            _uuidSearchTimer = new Timer(6000) {AutoReset = false};
             _uuidSearchTimer.Elapsed += (sender, args) => { searchTcs?.TrySetResult(true); };
 
-            _uuidSearchTimeoutTimer = new Timer(10000) { AutoReset = false }; //Timeout after 10 seconds
+            _uuidSearchTimeoutTimer = new Timer(20000) { AutoReset = false }; //Timeout after 10 seconds
             _uuidSearchTimeoutTimer.Elapsed += (sender, args) => { searchTcs?.TrySetResult(false); };
 
             _uuidReceiver = new SimpleBroadcastReceiver((context, intent) =>
             {
                 lock (_serviceUuidLocker)
                 {
+                    bool parcelUuidFound = false;
                     IParcelable[] parcelUuids = intent.GetParcelableArrayExtra(BluetoothDevice.ExtraUuid);
                     if (parcelUuids != null)
                     {
                         foreach (IParcelable parcelUuid in parcelUuids)
                         {
+                            parcelUuidFound = true;
                             var uuid = UUID.FromString(parcelUuid.ToString());
                             if (!_serviceUuids.Any(a => a.Equals(uuid)))
                             {
@@ -109,12 +115,24 @@ namespace BtClassicScanner.Droid.Services
                         }
                     }
 
-                    _uuidSearchTimer.Stop(); //does nothing if the timer is not already started
-                    _uuidSearchTimer.Start(); //Start the timer to stop searching, if another UUID isn't found first
+                    if (parcelUuidFound)
+                    {
+                        _uuidSearchTimer.Stop(); //does nothing if the timer is not already started
+                        _uuidSearchTimer.Start(); //Start the timer to stop searching, if another UUID isn't found first
+                    }
                 }
             });
 
+            _deviceConnectBroadcastReceived = false;
+            _deviceConnectedReceiver = new SimpleBroadcastReceiver((context, intent) =>
+                {
+                    _deviceConnectBroadcastReceived = true;
+                    _uuidSearchTimer.Stop();
+                    _uuidSearchTimer.Start();
+                });
+
             _context.RegisterReceiver(_uuidReceiver, new IntentFilter(BluetoothDevice.ActionUuid));
+            _context.RegisterReceiver(_deviceConnectedReceiver, new IntentFilter(BluetoothDevice.ActionAclConnected));
             _adapter.CancelDiscovery();
 
             deviceInfo.NativeDevice.FetchUuidsWithSdp();
@@ -125,6 +143,7 @@ namespace BtClassicScanner.Droid.Services
             _uuidSearchTimer.Stop();
             _uuidSearchTimeoutTimer.Stop();
             _context.UnregisterReceiver(_uuidReceiver);
+            _context.UnregisterReceiver(_deviceConnectedReceiver);
 
             return _serviceUuids.ToArray();
         }
@@ -139,19 +158,41 @@ namespace BtClassicScanner.Droid.Services
             BluetoothSocket deviceSocket;
             var tcs = new TaskCompletionSource<BluetoothSocket>();
 
-            var socketTimeout = new Timer(10000) {AutoReset = false};
+            var socketTimeout = new Timer(30000) {AutoReset = false};
             socketTimeout.Elapsed += (sender, args) => { tcs?.TrySetResult(null);};
 
             new Task(async () =>
             {
                 try
                 {
-                    IList<UUID> uuids = await GetDeviceServiceUuids(deviceInfo);
-                    if (!uuids.Contains(_scannerUuid))
+                    _foundUuid = null;
+                    ParcelUuid[] guids = deviceInfo.NativeDevice.GetUuids();
+                    if (guids == null || guids.Length == 0)
                     {
-                        throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_scannerUuid}");
+                        IList<UUID> uuids = await GetDeviceServiceUuids(deviceInfo);  //Note that this may or may not return any UUIDs - kind of hit or miss; so also checking to see if a connect happened
+                        if (uuids.Any(a => a.Equals(_expectedUuid)) || _deviceConnectBroadcastReceived)
+                        {
+                            guids = deviceInfo.NativeDevice.GetUuids();
+                            _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_expectedUuid))?.Uuid;
+                        }
                     }
-                    tcs.SetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_scannerUuid));
+                    else
+                    {
+                        _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_expectedUuid))?.Uuid;
+                    }
+
+                    if (_foundUuid == null)
+                    {
+                        throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_expectedUuid}");
+                    }
+
+                    //if ((!uuids.Contains(_scannerUuid)) && (!_deviceConnectBroadcastReceived))
+                    //{
+                    //    throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_scannerUuid}");
+                    //}
+                    tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_foundUuid));
+                    //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateInsecureRfcommSocketToServiceRecord(_foundUuid));
+                    //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_expectedUuid));
                 }
                 catch (Exception e)
                 {
@@ -172,74 +213,115 @@ namespace BtClassicScanner.Droid.Services
                 //Cancel discovery on adapter - just in case
                 _adapter.CancelDiscovery();
 
-                //var connectTcs = new TaskCompletionSource<bool>();
+                _connectDeviceTcs = new TaskCompletionSource<bool>();
 
-                try
+                new Task(() =>
                 {
-
-                        //var test = deviceInfo.NativeDevice.FetchUuidsWithSdp();  //This might work to get the UUIDS/service id.  Need to figure out how to receive the inbound intent - BroadcastReceiver?
-                    ////var uuids = deviceInfo.NativeDevice.GetUuids(); //Not working, and probably won't work
-
-                    //await connectTcs.Task;
-
-                    await deviceSocket.ConnectAsync();  //Currently failing - wrong service id?
-                    if (deviceSocket.IsConnected)
-                    {
-                        deviceInfo.IsConnected = true;
-                        deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
-                        deviceInfo.ConnectedSocket = deviceSocket;
-                        result = true;
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.WriteLine(e.ToString());
-                    Debugger.Break();
-
                     try
                     {
-                        deviceSocket.Close();
-                    }
-                    catch (Exception)
-                    {
-                        //Nothing to do here - couldn't close the socket
-                    }
+                        BluetoothSocket connectedSocket = null;
+                        try
+                        {
+                            deviceSocket.Connect();
+                            connectedSocket = deviceSocket;
+                        }
+                        //catch (Java.IO.IOException)
+                        //{
+                        //    try
+                        //    {
+                        //        //Attempting to use fallback socket as described here:
+                        //        // https://stackoverflow.com/questions/18657427/ioexception-read-failed-socket-might-closed-bluetooth-on-android-4-3
+                        //        BluetoothDevice device = deviceInfo.NativeDevice;
+                        //        var javaClass = Java.Lang.Class.ForName("android.bluetooth.BluetoothDevice");
+                        //        var javaMethod = javaClass.GetMethod("createRfcommSocket", new[] { Java.Lang.Integer.Type });
+                        //        BluetoothSocket fallbackSocket = (BluetoothSocket)javaMethod.Invoke(device, new Java.Lang.Object[] { 2 }); //{ 1 }
+                        //        fallbackSocket.Connect();
+                        //        connectedSocket = fallbackSocket;
+                        //    }
+                        //    catch (Exception)
+                        //    {
+                        //        throw;
+                        //    }
+                        //}
+                        catch (Exception)
+                        {
+                            throw;
+                        }
 
-                    result = false;
-                }
+                        if (connectedSocket != null)
+                        {
+                            deviceInfo.IsConnected = true;
+                            deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
+                            deviceInfo.ConnectedSocket = connectedSocket;
+                            _connectDeviceTcs?.TrySetResult(true);
+                        }
+                        else
+                        {
+                            _connectDeviceTcs?.TrySetResult(false);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        try
+                        {
+                            deviceSocket.Close();
+                        }
+                        catch (Exception)
+                        {
+                            //Nothing to do here - couldn't close the socket
+                        }
+                        Debug.WriteLine(e.ToString());
+                        Debugger.Break();
+                        _connectDeviceTcs?.TrySetResult(false);
+                    }
+                }).Start();
+
+                result = await _connectDeviceTcs.Task;
+
+                //try
+                //{
+
+                //        //var test = deviceInfo.NativeDevice.FetchUuidsWithSdp();  //This might work to get the UUIDS/service id.  Need to figure out how to receive the inbound intent - BroadcastReceiver?
+                //    ////var uuids = deviceInfo.NativeDevice.GetUuids(); //Not working, and probably won't work
+
+                //    //await connectTcs.Task;
+
+                //    await Task.Delay(3000);
+                //    bool isConnected = deviceSocket.IsConnected;
+
+                //    await deviceSocket.ConnectAsync();  //Currently failing - wrong service id?
+                //    if (deviceSocket.IsConnected)
+                //    {
+                //        deviceInfo.IsConnected = true;
+                //        deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
+                //        deviceInfo.ConnectedSocket = deviceSocket;
+                //        result = true;
+                //    }
+                //}
+                //catch (Exception e)
+                //{
+                //    Debug.WriteLine(e.ToString());
+                //    Debugger.Break();
+
+                //    try
+                //    {
+                //        deviceSocket.Close();
+                //    }
+                //    catch (Exception)
+                //    {
+                //        //Nothing to do here - couldn't close the socket
+                //    }
+
+                //    result = false;
+                //}
             }
 
 
 
 
-            //    await Task.Run(() =>
-            //    {
-            //        try
-            //        {
-            //            deviceSocket.Connect();
-            //            deviceInfo.IsConnected = true;
-            //            deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
-            //            deviceInfo.ConnectedSocket = deviceSocket;
-            //            connectTcs.SetResult(true);
-            //        }
-            //        catch (Exception e)
-            //        {
-            //            try
-            //            {
-            //                deviceSocket.Close();
-            //            }
-            //            catch (Exception)
-            //            {
-            //                //Nothing to do here - couldn't close the socket
-            //            }
-            //            Debug.WriteLine(e.ToString());
-            //            Debugger.Break();
-            //            connectTcs.SetResult(false);
-            //        }
-            //    });
-            //    result = await connectTcs.Task;
+
             //}
-            
+
             return result;
         }
 
@@ -577,13 +659,13 @@ namespace BtClassicScanner.Droid.Services
                 _discoveryFinishedReceiver = null;
             }
 
-            if (_pairedDeviceTcs != null)
+            if (_connectDeviceTcs != null)
             {
-                if (!(_pairedDeviceTcs.Task.IsCanceled || _pairedDeviceTcs.Task.IsCompleted))
+                if (!(_connectDeviceTcs.Task.IsCanceled || _connectDeviceTcs.Task.IsCompleted))
                 {
-                    _pairedDeviceTcs.TrySetCanceled();
+                    _connectDeviceTcs.TrySetCanceled();
                 }
-                _pairedDeviceTcs = null;
+                _connectDeviceTcs = null;
             }
 
             _discoveryTimeoutTimer?.Stop();
