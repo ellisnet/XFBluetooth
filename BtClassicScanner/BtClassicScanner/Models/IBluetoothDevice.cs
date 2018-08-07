@@ -6,6 +6,7 @@ namespace BtClassicScanner.Models
     {
         bool IsPaired { get; }
         bool IsConnected { get; }
+        bool IsDisposed { get; }
         string DeviceName { get; }
         string HardwareAddress { get; }
     }

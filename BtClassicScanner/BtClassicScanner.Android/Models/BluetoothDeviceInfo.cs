@@ -12,9 +12,11 @@ namespace BtClassicScanner.Models
         private bool _isConnected;
         public bool IsConnected
         {
-            get => _isConnected && ConnectedSocket != null;
+            get => _isConnected && ConnectedSocket != null && ConnectedSocket.IsConnected;
             set => _isConnected = value;
         }
+
+        public bool IsDisposed { get; private set; }
 
         public BluetoothSocket ConnectedSocket { get; set; }
         public string DeviceName => _device.Name;
@@ -29,7 +31,15 @@ namespace BtClassicScanner.Models
 
         public void Dispose()
         {
-            //TODO: Figure out what is needed to dispose the native device
+            IsDisposed = true;
+            if (ConnectedSocket != null && ConnectedSocket.IsConnected)
+            {
+                ConnectedSocket.Close();
+            }
+            ConnectedSocket?.Dispose();
+            ConnectedSocket = null;
+            _device?.Dispose();
+            _device = null;
         }
     }
 }

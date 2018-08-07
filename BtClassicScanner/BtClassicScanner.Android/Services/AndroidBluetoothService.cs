@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ using BtClassicScanner.Models;
 using BtClassicScanner.Services;
 using CodeBrix.Prism.Android.Services;
 using CodeBrix.Prism.Helpers;
+using Java.IO;
 using Java.Util;
 using Plugin.Permissions;
 using Plugin.Permissions.Abstractions;
@@ -35,7 +37,7 @@ namespace BtClassicScanner.Droid.Services
         private static bool _isDiscoveryCanceling;
         private static readonly object _discoveryLocker = new object();
         private static readonly object _deviceDiscoveredLocker = new object();
-        private static readonly UUID _expectedUuid = UUID.FromString("00001812-0000-1000-8000-00805f9b34fb");  //Read this UUID from the Teemi TMSL-55 2D barcode scanner
+        //private static readonly UUID _expectedUuid = UUID.FromString("00001812-0000-1000-8000-00805f9b34fb");  //Read this UUID from the Teemi TMSL-55 2D barcode scanner
         private static readonly UUID _serialPortUuid = UUID.FromString("00001101-0000-1000-8000-00805f9b34fb"); //Standard serial port uuid
         private static string _serviceName => _context.PackageName;
 
@@ -58,6 +60,11 @@ namespace BtClassicScanner.Droid.Services
         private Timer _uuidSearchTimer;
         private Timer _uuidSearchTimeoutTimer;
         private UUID _foundUuid;
+        private Action<byte[]> _incomingBytesAction;
+        private CancellationTokenSource _readBytesCancellation;
+        private readonly object _readBytesLocker = new object();
+        private BluetoothDeviceInfo _connectedDevice;
+        private InputStreamReader _connectedDeviceInputStream;
 
         #region Private methods
 
@@ -165,34 +172,35 @@ namespace BtClassicScanner.Droid.Services
             {
                 try
                 {
-                    _foundUuid = null;
-                    ParcelUuid[] guids = deviceInfo.NativeDevice.GetUuids();
-                    if (guids == null || guids.Length == 0)
-                    {
-                        IList<UUID> uuids = await GetDeviceServiceUuids(deviceInfo);  //Note that this may or may not return any UUIDs - kind of hit or miss; so also checking to see if a connect happened
-                        if (uuids.Any(a => a.Equals(_expectedUuid)) || _deviceConnectBroadcastReceived)
-                        {
-                            guids = deviceInfo.NativeDevice.GetUuids();
-                            _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_expectedUuid))?.Uuid;
-                        }
-                    }
-                    else
-                    {
-                        _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_expectedUuid))?.Uuid;
-                    }
+                    //_foundUuid = null;
+                    //ParcelUuid[] guids = deviceInfo.NativeDevice.GetUuids();
+                    //if (guids == null || guids.Length == 0)
+                    //{
+                    //    IList<UUID> uuids = await GetDeviceServiceUuids(deviceInfo);  //Note that this may or may not return any UUIDs - kind of hit or miss; so also checking to see if a connect happened
+                    //    if (uuids.Any(a => a.Equals(_serialPortUuid)) || _deviceConnectBroadcastReceived)
+                    //    {
+                    //        guids = deviceInfo.NativeDevice.GetUuids();
+                    //        _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_serialPortUuid))?.Uuid;
+                    //    }
+                    //}
+                    //else
+                    //{
+                    //    _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_serialPortUuid))?.Uuid;
+                    //}
 
-                    if (_foundUuid == null)
-                    {
-                        throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_expectedUuid}");
-                    }
+                    //if (_foundUuid == null)
+                    //{
+                    //    throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_serialPortUuid}");
+                    //}
 
                     //if ((!uuids.Contains(_scannerUuid)) && (!_deviceConnectBroadcastReceived))
                     //{
                     //    throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_scannerUuid}");
                     //}
-                    tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_foundUuid));
+                    //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_foundUuid));
                     //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateInsecureRfcommSocketToServiceRecord(_foundUuid));
                     //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_expectedUuid));
+                    tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_serialPortUuid));
                 }
                 catch (Exception e)
                 {
@@ -253,6 +261,47 @@ namespace BtClassicScanner.Droid.Services
                             deviceInfo.IsConnected = true;
                             deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
                             deviceInfo.ConnectedSocket = connectedSocket;
+                            _connectedDevice = deviceInfo;
+
+                            if (_incomingBytesAction != null)
+                            {
+                                _readBytesCancellation = new CancellationTokenSource();
+                                _connectedDeviceInputStream = new InputStreamReader(connectedSocket.InputStream);
+
+                                //Fire off a background task to continuously read bytes
+                                new Task(async () =>
+                                {
+                                    while (!_readBytesCancellation.IsCancellationRequested)
+                                    {
+                                        try
+                                        {
+                                            //lock (_readBytesLocker)
+                                            //{
+                                            var readBuffer = new char[1024];
+                                            int numBytes = await _connectedDeviceInputStream.ReadAsync(readBuffer);
+                                            if (numBytes > 0)
+                                            {
+                                                _incomingBytesAction?.Invoke(readBuffer.Take(numBytes).Select(s => (byte)s).ToArray());
+                                            }
+                                            //}
+                                        }
+                                        catch (Exception e)
+                                        {
+                                            Debug.WriteLine(e.ToString());
+                                            Debugger.Break();
+                                            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
+                                            if (_readBytesCancellation?.Token != null &&
+                                                _readBytesCancellation.Token.CanBeCanceled)
+                                            {
+                                                _readBytesCancellation.Cancel();
+                                            }
+
+                                            //TODO: Probably should have an ErrorAction that gets invoked here
+                                        }
+                                    }
+                                }).Start();
+                            }
+
                             _connectDeviceTcs?.TrySetResult(true);
                         }
                         else
@@ -518,12 +567,14 @@ namespace BtClassicScanner.Droid.Services
             return result;
         }
 
-        public async Task<bool> PairWithDevice(IBluetoothDevice device)
+        public async Task<bool> PairWithDevice(IBluetoothDevice device, Action<byte[]> incomingAction)
         {
             var deviceInfo = device as BluetoothDeviceInfo;
             if (deviceInfo == null) { throw new ArgumentNullException(nameof(device));}
 
-            bool result = deviceInfo.IsPaired;
+            _incomingBytesAction = incomingAction;
+
+            bool result = deviceInfo.IsPaired && deviceInfo.IsConnected;
 
             if (!result)
             {
@@ -572,7 +623,7 @@ namespace BtClassicScanner.Droid.Services
                 }
                 catch (Exception e)
                 {
-                    Debug.WriteLine($"Problem while pairing device:\n{e}");
+                    Debug.WriteLine($"Problem while pairing or connecting device:\n{e}");
                     throw;
                 }
                 finally
@@ -580,13 +631,17 @@ namespace BtClassicScanner.Droid.Services
                     _pairedDeviceLocker.Release();
                 }
             }
-            else
-            {
-                Debug.WriteLine($"Device '{deviceInfo.DeviceName}' is already paired.");
-            }
+            //else
+            //{
+            //    Debug.WriteLine($"Device '{deviceInfo.DeviceName}' is already paired.");
+            //}
 
             return result;
         }
+
+        //At this time, connecting to a previously paired device is the same as pairing with it for the first time
+        public Task<bool> ConnectWithPairedDevice(IBluetoothDevice device, Action<byte[]> incomingAction) 
+            => PairWithDevice(device, incomingAction);
 
         public async Task<IList<IBluetoothDevice>> GetPairedDevices()
         {
@@ -615,6 +670,38 @@ namespace BtClassicScanner.Droid.Services
             }
 
             return result;
+        }
+
+        public async Task DisconnectDevice()
+        {
+            await _pairedDeviceLocker.WaitAsync();
+            try
+            {
+                CheckAdapter();
+
+                if (_connectedDevice != null && _connectedDevice.IsConnected)
+                {
+                    if (_readBytesCancellation?.Token != null && _readBytesCancellation.Token.CanBeCanceled)
+                    {
+                        _readBytesCancellation.Cancel();
+                    }
+
+                    _connectedDeviceInputStream?.Close();
+                    _connectedDeviceInputStream?.Dispose();
+                    _connectedDeviceInputStream = null;
+                }
+                _connectedDevice?.Dispose();
+                _connectedDevice = null;
+            }
+            catch (Exception e)
+            {
+                Debug.WriteLine($"Problem while disconnecting from the active device:\n{e}");
+                throw;
+            }
+            finally
+            {
+                _pairedDeviceLocker.Release();
+            }
         }
 
         #endregion

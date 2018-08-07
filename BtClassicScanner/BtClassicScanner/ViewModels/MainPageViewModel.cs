@@ -1,6 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 using Acr.UserDialogs;
 using BtClassicScanner.Models;
 using BtClassicScanner.Services;
@@ -15,7 +18,14 @@ namespace BtClassicScanner.ViewModels
 {
     public class MainPageViewModel : ViewModelBase
     {
-        private static readonly string DeviceToLookFor = "SL_";
+        //private static readonly string DeviceToLookFor = "SL_"; //TMSL-55 - BLE scanner
+        private static readonly string DeviceToLookFor = "CT1018"; //TMCT-10 Pro - Bluetooth classic scanner
+
+        public static readonly byte LineFeed = 0x0a;
+        public static readonly byte CarriageReturn = 0x0d;
+
+        private readonly List<byte> _incomingBytes = new List<byte>();
+        private readonly object _incomingByteLocker = new object();
 
         private IBluetoothService _bluetoothService;
         private SimpleObserver<IBluetoothDevice> _discoveryObserver;
@@ -30,6 +40,13 @@ namespace BtClassicScanner.ViewModels
             set => SetProperty(ref _isFindingDevices, value);
         }
 
+        private bool _isScannerPaired;
+        public bool IsScannerPaired
+        {
+            get => _isScannerPaired;
+            set => SetProperty(ref _isScannerPaired, value);
+        }
+
         #endregion
 
         #region Commands and their implementations
@@ -38,8 +55,9 @@ namespace BtClassicScanner.ViewModels
 
         private DelegateCommand _findDevicesCommand;
         public DelegateCommand FindDevicesCommand =>
-            LazyCommand(ref _findDevicesCommand, DoFindDevices, () => !IsFindingDevices)
-                .ObservesProperty(() => IsFindingDevices);
+            LazyCommand(ref _findDevicesCommand, DoFindDevices, () => (!IsFindingDevices) && (!IsScannerPaired))
+                .ObservesProperty(() => IsFindingDevices)
+                .ObservesProperty(() => IsScannerPaired);
 
         public async void DoFindDevices()
         {
@@ -106,9 +124,70 @@ namespace BtClassicScanner.ViewModels
                 {
                     DialogService.Toast($"Scanner found! Name: {device.DeviceName} - Address: {device.HardwareAddress}");
                     await _bluetoothService.StopDeviceDiscovery();
-                    bool isPaired = await _bluetoothService.PairWithDevice(device);
+                    IsScannerPaired = await _bluetoothService.PairWithDevice(device, ProcessIncomingBytes);
                 }
             }
+        }
+
+        private void ProcessIncomingBytes(byte[] incoming)
+        {
+            if (incoming != null && incoming.Length > 0)
+            {
+                lock (_incomingByteLocker)
+                {
+                    bool endOfCode = false;
+                    foreach (byte current in incoming)
+                    {
+                        endOfCode = current == LineFeed || current == CarriageReturn;
+                        if (endOfCode)
+                        {
+                            break;
+                        }
+                        else
+                        {
+                            _incomingBytes.Add(current);
+                        }
+                    }
+
+                    if (endOfCode)
+                    {
+                        string barcode = null;
+                        if (_incomingBytes.Count > 0)
+                        {
+                            barcode = Encoding.ASCII.GetString(_incomingBytes.ToArray());
+                        }
+                        _incomingBytes.Clear();
+                        if (barcode != null)
+                        {
+                            //This needs to be fire-and-forget
+                            new Task(async () =>
+                            {
+                                string message = barcode;
+                                await DialogService.AlertAsync(message, "Barcode read!");
+                            }).Start();
+                        }
+                    }
+                }
+            }
+        }
+
+        private async Task<bool> CheckConnectPairedDevice()
+        {
+            bool result = false;
+
+            IList<IBluetoothDevice> paired = await _bluetoothService.GetPairedDevices();
+            if (paired.Any(a => a.DeviceName.Contains(DeviceToLookFor)))
+            {
+                IBluetoothDevice device = paired.First(f => f.DeviceName.Contains(DeviceToLookFor));
+                result = await _bluetoothService.ConnectWithPairedDevice(device, ProcessIncomingBytes);
+                IsScannerPaired = result;
+                if (result)
+                {
+                    DialogService.Toast($"Scanner found! Name: {device.DeviceName} - Address: {device.HardwareAddress}");
+                }
+            }
+
+            return result;
         }
 
         public MainPageViewModel(
@@ -118,6 +197,13 @@ namespace BtClassicScanner.ViewModels
             : base(navigationService, dialogService)
         {
             _bluetoothService = bluetoothService ?? throw new ArgumentNullException(nameof(bluetoothService));
+
+            //Starting a fire-and-forget task to try connecting to a previously paired device
+            new Task(async () =>
+            {
+                await Task.Delay(500);
+                await CheckConnectPairedDevice();
+            }).Start();
         }
 
         public override void Destroy()
