@@ -1,8 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Android.Bluetooth;
@@ -27,8 +27,28 @@ using Timer = System.Timers.Timer;
 
 namespace BtClassicScanner.Droid.Services
 {
-    public class AndroidBluetoothService : IBluetoothService, IObservable<IBluetoothDevice>
+    public class AndroidBluetoothService : IBluetoothService, IObservable<IBluetoothDevice>, IObservable<IncomingBytes>
     {
+        //This idea to automatically approve the pairing request did not work, because the necessary permissions are not available to third-party apps - see notes below.
+
+        //public static Action<Intent> PairingRequestAction { get; set; } = (intent) =>
+        //{
+        //    if (intent != null)
+        //    {
+        //        var pairingDevice = (BluetoothDevice)intent.GetParcelableExtra(BluetoothDevice.ExtraDevice);
+        //        int pin = intent.GetIntExtra(BluetoothDevice.ExtraPairingKey, 0);
+        //        byte[] pinBytes = Encoding.UTF8.GetBytes(pin.ToString());
+        //        pairingDevice.SetPin(pinBytes);
+        
+        //        //The following line fails on newer versions of Android (8 or greater?) - and says that the app needs "android.permission.BLUETOOTH_PRIVILEGED" - but this
+        //        // permission cannot be successfully added to the app manifest; because, according to the Google docs, "This is not available to third party applications.":
+        //        // https://developer.android.com/reference/android/Manifest.permission#BLUETOOTH_PRIVILEGED
+        //        pairingDevice.SetPairingConfirmation(true);
+        //    }
+        //};
+
+        #region Private static fields
+
         private static Context _context;
         private static BluetoothAdapter _adapter;
         private static bool _isDiscovering;
@@ -37,13 +57,17 @@ namespace BtClassicScanner.Droid.Services
         private static bool _isDiscoveryCanceling;
         private static readonly object _discoveryLocker = new object();
         private static readonly object _deviceDiscoveredLocker = new object();
-        //private static readonly UUID _expectedUuid = UUID.FromString("00001812-0000-1000-8000-00805f9b34fb");  //Read this UUID from the Teemi TMSL-55 2D barcode scanner
         private static readonly UUID _serialPortUuid = UUID.FromString("00001101-0000-1000-8000-00805f9b34fb"); //Standard serial port uuid
-        private static string _serviceName => _context.PackageName;
 
-        private readonly object _discoverySubscriberLocker = new object();
+        #endregion
+
+        #region Private instance fields
+
         private readonly List<ObserverSubscription<IBluetoothDevice>> _discoverySubscriptions 
             = new List<ObserverSubscription<IBluetoothDevice>>();
+
+        private readonly List<ObserverSubscription<IncomingBytes>> _incomingSubscriptions
+            = new List<ObserverSubscription<IncomingBytes>>();
 
         private SimpleBroadcastReceiver _discoveryReceiver;
         private SimpleBroadcastReceiver _discoveryStartedReceiver;
@@ -59,27 +83,13 @@ namespace BtClassicScanner.Droid.Services
         private readonly object _serviceUuidLocker = new object();
         private Timer _uuidSearchTimer;
         private Timer _uuidSearchTimeoutTimer;
-        private UUID _foundUuid;
-        private Action<byte[]> _incomingBytesAction;
         private CancellationTokenSource _readBytesCancellation;
-        private readonly object _readBytesLocker = new object();
         private BluetoothDeviceInfo _connectedDevice;
         private InputStreamReader _connectedDeviceInputStream;
 
-        #region Private methods
+        #endregion
 
-        private void RemoveDiscoverySubscriber(Guid subscriptionId)
-        {
-            lock (_discoverySubscriberLocker)
-            {
-                ObserverSubscription<IBluetoothDevice>[] subscribersToRemove =
-                    _discoverySubscriptions.Where(w => w.SubscriptionId == subscriptionId).ToArray();
-                foreach (ObserverSubscription<IBluetoothDevice> subscription in subscribersToRemove)
-                {
-                    _discoverySubscriptions.Remove(subscription);
-                }
-            }
-        }
+        #region Private methods
 
         private void CheckAdapter()
         {
@@ -155,64 +165,33 @@ namespace BtClassicScanner.Droid.Services
             return _serviceUuids.ToArray();
         }
 
-        //TODO: Do I need the server socket at all?
-        private async Task<bool> ConnectDeviceToSocket(BluetoothDeviceInfo deviceInfo) //, BluetoothSocket serverSocket)
+        private async Task<bool> ConnectDeviceToSocket(BluetoothDeviceInfo deviceInfo)
         {
             if (deviceInfo == null) { throw new ArgumentNullException(nameof(deviceInfo)); }
-            //if (serverSocket == null) { throw new ArgumentNullException(nameof(serverSocket)); }
             bool result = false;
 
-            BluetoothSocket deviceSocket;
             var tcs = new TaskCompletionSource<BluetoothSocket>();
 
             var socketTimeout = new Timer(30000) {AutoReset = false};
             socketTimeout.Elapsed += (sender, args) => { tcs?.TrySetResult(null);};
 
-            new Task(async () =>
+            new Task(() =>
             {
                 try
                 {
-                    //_foundUuid = null;
-                    //ParcelUuid[] guids = deviceInfo.NativeDevice.GetUuids();
-                    //if (guids == null || guids.Length == 0)
-                    //{
-                    //    IList<UUID> uuids = await GetDeviceServiceUuids(deviceInfo);  //Note that this may or may not return any UUIDs - kind of hit or miss; so also checking to see if a connect happened
-                    //    if (uuids.Any(a => a.Equals(_serialPortUuid)) || _deviceConnectBroadcastReceived)
-                    //    {
-                    //        guids = deviceInfo.NativeDevice.GetUuids();
-                    //        _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_serialPortUuid))?.Uuid;
-                    //    }
-                    //}
-                    //else
-                    //{
-                    //    _foundUuid = guids.FirstOrDefault(f => f.Uuid.Equals(_serialPortUuid))?.Uuid;
-                    //}
-
-                    //if (_foundUuid == null)
-                    //{
-                    //    throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_serialPortUuid}");
-                    //}
-
-                    //if ((!uuids.Contains(_scannerUuid)) && (!_deviceConnectBroadcastReceived))
-                    //{
-                    //    throw new InvalidOperationException($"The discovered device does not appear to support the specified service UUID: {_scannerUuid}");
-                    //}
-                    //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_foundUuid));
-                    //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateInsecureRfcommSocketToServiceRecord(_foundUuid));
-                    //tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_expectedUuid));
                     tcs?.TrySetResult(deviceInfo.NativeDevice.CreateRfcommSocketToServiceRecord(_serialPortUuid));
                 }
                 catch (Exception e)
                 {
                     Debug.WriteLine(e.ToString());
                     Debugger.Break();
-                    throw;
+                    tcs?.TrySetResult(null);
                 }
             }).Start();
 
             socketTimeout.Start();
 
-            deviceSocket = await tcs.Task;
+            var deviceSocket = await tcs.Task;
 
             socketTimeout.Stop();
 
@@ -230,7 +209,10 @@ namespace BtClassicScanner.Droid.Services
                         BluetoothSocket connectedSocket = null;
                         try
                         {
-                            deviceSocket.Connect();
+                            deviceSocket.Connect(); //This line causes the user to be prompted to pair the device, if it wasn't already paired.
+
+                            //The following line will not be hit until the user taps "PAIR" (if they needed to pair the device) - so, if we
+                            //  successfully get past Connect() - the user *did* choose to pair the device; or it was already paired.
                             connectedSocket = deviceSocket;
                         }
                         //catch (Java.IO.IOException)
@@ -251,8 +233,14 @@ namespace BtClassicScanner.Droid.Services
                         //        throw;
                         //    }
                         //}
-                        catch (Exception)
+                        catch (IOException ioEx)
                         {
+                            throw new Exception($"Unable to connect to the Bluetooth device, possibly because the user did not tap the 'PAIR' option - {ioEx.Message}", ioEx);
+                        }
+                        catch (Exception e)
+                        {
+                            Debug.WriteLine(e.ToString());
+                            Debugger.Break();
                             throw;
                         }
 
@@ -263,44 +251,38 @@ namespace BtClassicScanner.Droid.Services
                             deviceInfo.ConnectedSocket = connectedSocket;
                             _connectedDevice = deviceInfo;
 
-                            if (_incomingBytesAction != null)
+                            _readBytesCancellation = new CancellationTokenSource();
+                            _connectedDeviceInputStream = new InputStreamReader(connectedSocket.InputStream);
+
+                            //Fire off a background task to continuously read bytes
+                            new Task(async () =>
                             {
-                                _readBytesCancellation = new CancellationTokenSource();
-                                _connectedDeviceInputStream = new InputStreamReader(connectedSocket.InputStream);
-
-                                //Fire off a background task to continuously read bytes
-                                new Task(async () =>
+                                while (!_readBytesCancellation.IsCancellationRequested)
                                 {
-                                    while (!_readBytesCancellation.IsCancellationRequested)
+                                    try
                                     {
-                                        try
+                                        var readBuffer = new char[1024];
+                                        int numBytes = await _connectedDeviceInputStream.ReadAsync(readBuffer);
+                                        if (numBytes > 0)
                                         {
-                                            //lock (_readBytesLocker)
-                                            //{
-                                            var readBuffer = new char[1024];
-                                            int numBytes = await _connectedDeviceInputStream.ReadAsync(readBuffer);
-                                            if (numBytes > 0)
-                                            {
-                                                _incomingBytesAction?.Invoke(readBuffer.Take(numBytes).Select(s => (byte)s).ToArray());
-                                            }
-                                            //}
-                                        }
-                                        catch (Exception e)
-                                        {
-                                            Debug.WriteLine(e.ToString());
-                                            Debugger.Break();
-                                            // ReSharper disable once ConditionIsAlwaysTrueOrFalse
-                                            if (_readBytesCancellation?.Token != null &&
-                                                _readBytesCancellation.Token.CanBeCanceled)
-                                            {
-                                                _readBytesCancellation.Cancel();
-                                            }
-
-                                            //TODO: Probably should have an ErrorAction that gets invoked here
+                                            _incomingSubscriptions.NotifyAllNext(new IncomingBytes(readBuffer.Take(numBytes).Select(s => (byte)s).ToArray()));
                                         }
                                     }
-                                }).Start();
-                            }
+                                    catch (Exception e)
+                                    {
+                                        Debug.WriteLine(e.ToString());
+                                        Debugger.Break();
+                                        // ReSharper disable once ConditionIsAlwaysTrueOrFalse
+                                        if (_readBytesCancellation?.Token != null &&
+                                            _readBytesCancellation.Token.CanBeCanceled)
+                                        {
+                                            _readBytesCancellation.Cancel();
+                                        }
+
+                                        _incomingSubscriptions.NotifyAllError(e);
+                                    }
+                                }
+                            }).Start();
 
                             _connectDeviceTcs?.TrySetResult(true);
                         }
@@ -326,50 +308,52 @@ namespace BtClassicScanner.Droid.Services
                 }).Start();
 
                 result = await _connectDeviceTcs.Task;
-
-                //try
-                //{
-
-                //        //var test = deviceInfo.NativeDevice.FetchUuidsWithSdp();  //This might work to get the UUIDS/service id.  Need to figure out how to receive the inbound intent - BroadcastReceiver?
-                //    ////var uuids = deviceInfo.NativeDevice.GetUuids(); //Not working, and probably won't work
-
-                //    //await connectTcs.Task;
-
-                //    await Task.Delay(3000);
-                //    bool isConnected = deviceSocket.IsConnected;
-
-                //    await deviceSocket.ConnectAsync();  //Currently failing - wrong service id?
-                //    if (deviceSocket.IsConnected)
-                //    {
-                //        deviceInfo.IsConnected = true;
-                //        deviceInfo.IsPaired = true; //TODO: Confirm that it is paired at this point
-                //        deviceInfo.ConnectedSocket = deviceSocket;
-                //        result = true;
-                //    }
-                //}
-                //catch (Exception e)
-                //{
-                //    Debug.WriteLine(e.ToString());
-                //    Debugger.Break();
-
-                //    try
-                //    {
-                //        deviceSocket.Close();
-                //    }
-                //    catch (Exception)
-                //    {
-                //        //Nothing to do here - couldn't close the socket
-                //    }
-
-                //    result = false;
-                //}
             }
 
+            return result;
+        }
 
+        private async Task<bool> ConnectPairWithDevice(IBluetoothDevice device)
+        {
+            var deviceInfo = device as BluetoothDeviceInfo;
+            if (deviceInfo == null) { throw new ArgumentNullException(nameof(device)); }
 
+            bool result = deviceInfo.IsPaired && deviceInfo.IsConnected;
 
+            if (!result)
+            {
+                await _pairedDeviceLocker.WaitAsync();
 
-            //}
+                try
+                {
+                    CheckAdapter();
+
+                    //SimpleBroadcastReceiver pairReceiver = null;
+
+                    //This idea to automatically approve the pairing request did not work, because the necessary permissions 
+                    // are not available to third-party apps - see notes at the top of the class.
+                    
+                    //if (waitForPairing && PairingRequestAction != null)
+                    //{
+                    //    pairReceiver = new SimpleBroadcastReceiver((context, intent) 
+                    //        => PairingRequestAction.Invoke(intent));
+                    //    pairReceiver.Register(_context, new IntentFilter(BluetoothDevice.ActionPairingRequest));
+                    //}
+
+                    result = await ConnectDeviceToSocket(deviceInfo);
+
+                    //pairReceiver?.Unregister(_context);
+                }
+                catch (Exception e)
+                {
+                    Debug.WriteLine($"Problem while pairing or connecting device:\n{e}");
+                    throw;
+                }
+                finally
+                {
+                    _pairedDeviceLocker.Release();
+                }
+            }
 
             return result;
         }
@@ -382,7 +366,9 @@ namespace BtClassicScanner.Droid.Services
         public bool IsDiscovering => _isDiscovering && _isDiscoveryRunning;
 
         public IObservable<IBluetoothDevice> GetDiscoveryObservable() => this;
- 
+
+        public IObservable<IncomingBytes> GetIncomingObservable() => this;
+
         public async Task<bool> StartDeviceDiscovery(int? timeoutSeconds = null)
         {
             bool startDiscovery = false;
@@ -409,15 +395,7 @@ namespace BtClassicScanner.Droid.Services
                         if (intent.Action.Equals(BluetoothDevice.ActionFound))
                         {
                             var device = (BluetoothDevice)intent.GetParcelableExtra(BluetoothDevice.ExtraDevice);
-                            var deviceInfo = new BluetoothDeviceInfo(device);
-                            lock (_discoverySubscriberLocker)
-                            {
-                                ObserverSubscription<IBluetoothDevice>[] subscriptionsToNotify = _discoverySubscriptions.ToArray();
-                                foreach (ObserverSubscription<IBluetoothDevice> subscription in subscriptionsToNotify)
-                                {
-                                    subscription.NotifyNext(deviceInfo);
-                                }
-                            }
+                            _discoverySubscriptions.NotifyAllNext(new BluetoothDeviceInfo(device));
                         }
                     }
                 });
@@ -510,14 +488,7 @@ namespace BtClassicScanner.Droid.Services
 
                 CheckAdapter();
 
-                lock (_discoverySubscriberLocker)
-                {
-                    ObserverSubscription<IBluetoothDevice>[] subscriptionsToNotify = _discoverySubscriptions.ToArray();
-                    foreach (ObserverSubscription<IBluetoothDevice> subscription in subscriptionsToNotify)
-                    {
-                        subscription.NotifyCompleted();
-                    }
-                }
+                _discoverySubscriptions.NotifyAllCompleted();
 
                 if (_adapter.IsEnabled && _adapter.IsDiscovering)
                 {
@@ -567,81 +538,11 @@ namespace BtClassicScanner.Droid.Services
             return result;
         }
 
-        public async Task<bool> PairWithDevice(IBluetoothDevice device, Action<byte[]> incomingAction)
-        {
-            var deviceInfo = device as BluetoothDeviceInfo;
-            if (deviceInfo == null) { throw new ArgumentNullException(nameof(device));}
+        public Task<bool> PairWithDevice(IBluetoothDevice device)
+            => ConnectPairWithDevice(device);
 
-            _incomingBytesAction = incomingAction;
-
-            bool result = deviceInfo.IsPaired && deviceInfo.IsConnected;
-
-            if (!result)
-            {
-                await _pairedDeviceLocker.WaitAsync();
-
-                try
-                {
-                    CheckAdapter();
-
-                    result = await ConnectDeviceToSocket(deviceInfo);
-
-                    //BluetoothServerSocket tempSocket;
-                    //BluetoothSocket socket;
-                    //var tcs = new TaskCompletionSource<BluetoothServerSocket>();
-
-                    ////TODO: Need to kick off a timer to time out the task
-
-                    //await Task.Run(() =>
-                    //{
-                    //    try
-                    //    {
-                    //        tcs.SetResult(_adapter.ListenUsingRfcommWithServiceRecord(_serviceName, _serviceUuid));
-                    //    }
-                    //    catch (Exception e)
-                    //    {
-                    //        Debug.WriteLine(e.ToString());
-                    //        Debugger.Break();
-                    //        throw;
-                    //    }
-                    //});
-
-                    //tempSocket = await tcs.Task;
-
-                    //try
-                    //{
-                    //    socket = await tempSocket.AcceptAsync(2000); //Can't find documentation about what the timeout is - assuming milliseconds?
-                    //    result = await ConnectDeviceToSocket(deviceInfo, socket);
-                    //    tempSocket.Close();
-                    //}
-                    //catch (Exception e)
-                    //{
-                    //    Debug.WriteLine(e.ToString());
-                    //    Debugger.Break();
-                    //    throw;
-                    //}                    
-                }
-                catch (Exception e)
-                {
-                    Debug.WriteLine($"Problem while pairing or connecting device:\n{e}");
-                    throw;
-                }
-                finally
-                {
-                    _pairedDeviceLocker.Release();
-                }
-            }
-            //else
-            //{
-            //    Debug.WriteLine($"Device '{deviceInfo.DeviceName}' is already paired.");
-            //}
-
-            return result;
-        }
-
-        //At this time, connecting to a previously paired device is the same as pairing with it for the first time
-        public Task<bool> ConnectWithPairedDevice(IBluetoothDevice device, Action<byte[]> incomingAction) 
-            => PairWithDevice(device, incomingAction);
+        public Task<bool> ConnectWithPairedDevice(IBluetoothDevice device) 
+            => ConnectPairWithDevice(device);
 
         public async Task<IList<IBluetoothDevice>> GetPairedDevices()
         {
@@ -711,12 +612,20 @@ namespace BtClassicScanner.Droid.Services
         public IDisposable Subscribe(IObserver<IBluetoothDevice> subscriber)
         {
             if (subscriber == null) { throw new ArgumentNullException(nameof(subscriber)); }
-            var subscription = new ObserverSubscription<IBluetoothDevice>(subscriber, RemoveDiscoverySubscriber);
-            lock (_discoverySubscriberLocker)
-            {
-                _discoverySubscriptions.Add(subscription);
-            }
+            var subscription = new ObserverSubscription<IBluetoothDevice>(subscriber, id => _discoverySubscriptions.RemoveSubscription(id));
+            _discoverySubscriptions.AddSubscription(subscription);
+            return subscription;
+        }
 
+        #endregion
+
+        #region Implement IObservable<IncomingBytes>
+
+        public IDisposable Subscribe(IObserver<IncomingBytes> subscriber)
+        {
+            if (subscriber == null) { throw new ArgumentNullException(nameof(subscriber)); }
+            var subscription = new ObserverSubscription<IncomingBytes>(subscriber, id => _incomingSubscriptions.RemoveSubscription(id));
+            _incomingSubscriptions.AddSubscription(subscription);
             return subscription;
         }
 
@@ -757,6 +666,18 @@ namespace BtClassicScanner.Droid.Services
 
             _discoveryTimeoutTimer?.Stop();
             _discoveryTimeoutTimer?.Dispose();
+
+            foreach (ObserverSubscription<IBluetoothDevice> subscription in _discoverySubscriptions.GetActiveSubscriptions())
+            {
+                subscription.NotifyCompleted();
+            }
+            _discoverySubscriptions.ClearSubscriptions();
+
+            foreach (ObserverSubscription<IncomingBytes> subscription in _incomingSubscriptions.GetActiveSubscriptions())
+            {
+                subscription.NotifyCompleted();
+            }
+            _incomingSubscriptions.ClearSubscriptions();
 
             _adapter = null;
             _context = null;

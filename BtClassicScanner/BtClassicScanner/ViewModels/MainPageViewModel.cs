@@ -5,7 +5,6 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Acr.UserDialogs;
-using BtClassicScanner.Models;
 using BtClassicScanner.Services;
 using CodeBrix.Prism.Helpers;
 using CodeBrix.Prism.ViewModels;
@@ -18,7 +17,6 @@ namespace BtClassicScanner.ViewModels
 {
     public class MainPageViewModel : ViewModelBase
     {
-        //private static readonly string DeviceToLookFor = "SL_"; //TMSL-55 - BLE scanner
         private static readonly string DeviceToLookFor = "CT1018"; //TMCT-10 Pro - Bluetooth classic scanner
 
         public static readonly byte LineFeed = 0x0a;
@@ -29,7 +27,8 @@ namespace BtClassicScanner.ViewModels
 
         private IBluetoothService _bluetoothService;
         private SimpleObserver<IBluetoothDevice> _discoveryObserver;
-        private IPermissions _permissions = CrossPermissions.Current;
+        private SimpleObserver<IncomingBytes> _incomingObserver;
+        private readonly IPermissions _permissions = CrossPermissions.Current;
 
         #region Bindable properties
 
@@ -124,19 +123,19 @@ namespace BtClassicScanner.ViewModels
                 {
                     DialogService.Toast($"Scanner found! Name: {device.DeviceName} - Address: {device.HardwareAddress}");
                     await _bluetoothService.StopDeviceDiscovery();
-                    IsScannerPaired = await _bluetoothService.PairWithDevice(device, ProcessIncomingBytes);
+                    IsScannerPaired = await _bluetoothService.PairWithDevice(device);
                 }
             }
         }
 
-        private void ProcessIncomingBytes(byte[] incoming)
+        private void ProcessIncomingBytes(IncomingBytes incoming)
         {
-            if (incoming != null && incoming.Length > 0)
+            if (incoming?.Bytes != null && incoming.Bytes.Length > 0)
             {
                 lock (_incomingByteLocker)
                 {
                     bool endOfCode = false;
-                    foreach (byte current in incoming)
+                    foreach (byte current in incoming.Bytes)
                     {
                         endOfCode = current == LineFeed || current == CarriageReturn;
                         if (endOfCode)
@@ -179,7 +178,7 @@ namespace BtClassicScanner.ViewModels
             if (paired.Any(a => a.DeviceName.Contains(DeviceToLookFor)))
             {
                 IBluetoothDevice device = paired.First(f => f.DeviceName.Contains(DeviceToLookFor));
-                result = await _bluetoothService.ConnectWithPairedDevice(device, ProcessIncomingBytes);
+                result = await _bluetoothService.ConnectWithPairedDevice(device);
                 IsScannerPaired = result;
                 if (result)
                 {
@@ -198,6 +197,11 @@ namespace BtClassicScanner.ViewModels
         {
             _bluetoothService = bluetoothService ?? throw new ArgumentNullException(nameof(bluetoothService));
 
+            _incomingObserver = new SimpleObserver<IncomingBytes>(ProcessIncomingBytes, 
+                () => { }, //Not doing anything with OnCompleted()
+                async (error) => { await ShowErrorAsync(error); });
+            _incomingObserver.GetSubscription(_bluetoothService.GetIncomingObservable());
+
             //Starting a fire-and-forget task to try connecting to a previously paired device
             new Task(async () =>
             {
@@ -210,6 +214,8 @@ namespace BtClassicScanner.ViewModels
         {
             _discoveryObserver?.Dispose();
             _discoveryObserver = null;
+            _incomingObserver?.Dispose();
+            _incomingObserver = null;
             _bluetoothService.Dispose();
             _bluetoothService = null;
             base.Destroy();

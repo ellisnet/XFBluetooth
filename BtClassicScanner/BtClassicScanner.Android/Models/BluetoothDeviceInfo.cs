@@ -1,5 +1,6 @@
 ﻿using System;
 using Android.Bluetooth;
+using BtClassicScanner.Services;
 
 namespace BtClassicScanner.Models
 {
