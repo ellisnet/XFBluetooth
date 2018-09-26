@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 using Acr.UserDialogs;
 using BtClassicScanner.Services;
 using CodeBrix.Prism.Helpers;
-using CodeBrix.Prism.ViewModels;
+using CodeBrix.Prism.Abstract;
 using Plugin.Permissions;
 using Plugin.Permissions.Abstractions;
 using Prism.Commands;
@@ -193,7 +193,7 @@ namespace BtClassicScanner.ViewModels
             INavigationService navigationService,
             IUserDialogs dialogService,
             IBluetoothService bluetoothService)
-            : base(navigationService, dialogService)
+            : base(navigationService, null, dialogService)
         {
             _bluetoothService = bluetoothService ?? throw new ArgumentNullException(nameof(bluetoothService));
 

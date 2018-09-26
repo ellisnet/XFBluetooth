@@ -10,7 +10,7 @@ using Android.Content;
 using Android.OS;
 using BtClassicScanner.Models;
 using BtClassicScanner.Services;
-using CodeBrix.Prism.Android.Services;
+using CodeBrix.Prism.Services;
 using CodeBrix.Prism.Helpers;
 using Java.IO;
 using Java.Util;
@@ -302,7 +302,7 @@ namespace BtClassicScanner.Droid.Services
                             //Nothing to do here - couldn't close the socket
                         }
                         Debug.WriteLine(e.ToString());
-                        Debugger.Break();
+                        Debugger.Break();  //I seem to hit this somewhat regularly during the first connect/pairing - maybe retry connecting a couple of times?
                         _connectDeviceTcs?.TrySetResult(false);
                     }
                 }).Start();
